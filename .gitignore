@@ -1,0 +1,27 @@
+# Screenshots output directory & image artifacts
+screenshots/
+test_screenshots/
+*.png
+
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE & OS specific files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Playwright & Testing artifacts
+playwright-report/
+test-results/
