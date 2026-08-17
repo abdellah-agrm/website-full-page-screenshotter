@@ -21,18 +21,81 @@ from urllib.parse import urljoin, urlparse, urldefrag
 from collections import deque
 import subprocess
 
-import requests
-from bs4 import BeautifulSoup
-from PIL import Image
+import urllib.request
+import urllib.parse
+import urllib.error
 
-import customtkinter as ctk
+try:
+    import requests
+    _HAS_REQUESTS = True
+except ImportError:
+    _HAS_REQUESTS = False
 
-# Configure CustomTkinter Theme
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("blue")
+try:
+    from bs4 import BeautifulSoup
+    _HAS_BS4 = True
+except ImportError:
+    _HAS_BS4 = False
+
+try:
+    from PIL import Image, ImageTk
+    _HAS_PIL = True
+except ImportError:
+    _HAS_PIL = False
+
+try:
+    import customtkinter as ctk
+    _HAS_CTK = True
+    BaseGUI = ctk.CTk
+except ImportError:
+    _HAS_CTK = False
+    BaseGUI = object
+
+if _HAS_CTK:
+    ctk.set_appearance_mode("Dark")
+    ctk.set_default_color_theme("blue")
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 SiteScreenshotPro/2.0'}
 SKIP_EXT = re.compile(r'\.(pdf|jpg|jpeg|png|gif|svg|webp|zip|mp4|mp3|css|js|ico|xml|woff2?|ttf|eot)$', re.I)
+
+
+def http_get(url, timeout=10):
+    """Fetch URL content with requests if available or urllib fallback."""
+    if _HAS_REQUESTS:
+        resp = requests.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+        return resp.status_code, resp.headers.get('Content-Type', ''), resp.text, resp.url
+    else:
+        req = urllib.request.Request(url, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.status
+            ctype = resp.headers.get('Content-Type', '')
+            charset = 'utf-8'
+            if 'charset=' in ctype.lower():
+                charset = ctype.lower().split('charset=')[-1].split(';')[0].strip()
+            text = resp.read().decode(charset, errors='replace')
+            return status, ctype, text, resp.geturl()
+
+
+def extract_sitemap_locs(html_text):
+    """Extract <loc> URLs from sitemap XML text."""
+    if _HAS_BS4:
+        try:
+            soup = BeautifulSoup(html_text, 'html.parser')
+            return [loc.text.strip() for loc in soup.find_all('loc')]
+        except Exception:
+            pass
+    return [m.strip() for m in re.findall(r'<loc>(.*?)</loc>', html_text, re.I | re.S)]
+
+
+def extract_html_hrefs(html_text):
+    """Extract href links from HTML text."""
+    if _HAS_BS4:
+        try:
+            soup = BeautifulSoup(html_text, 'html.parser')
+            return [a['href'].strip() for a in soup.find_all('a', href=True)]
+        except Exception:
+            pass
+    return [m.strip() for m in re.findall(r'<a\s+(?:[^>]*?\s+)?href=["\'](.*?)["\']', html_text, re.I)]
 
 
 def get_base_domain(netloc):
@@ -93,22 +156,20 @@ def get_sitemap_urls(base_url, log_callback=None, cancel_check=None):
         if log_callback:
             log_callback(f"Checking sitemap target: {sitemap_url}", "INFO")
         try:
-            resp = requests.get(sitemap_url, headers=HEADERS, timeout=10)
-            if resp.status_code != 200:
+            status, ctype, text, final_url = http_get(sitemap_url, timeout=10)
+            if status != 200:
                 continue
             
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            locs = [loc.text.strip() for loc in soup.find_all('loc')]
+            locs = extract_sitemap_locs(text)
             nested = [l for l in locs if l.endswith('.xml')]
             
             for nested_url in nested:
                 if cancel_check and cancel_check():
                     break
                 try:
-                    r2 = requests.get(nested_url, headers=HEADERS, timeout=10)
-                    s2 = BeautifulSoup(r2.text, 'html.parser')
-                    for l in s2.find_all('loc'):
-                        norm = normalize_url(l.text.strip())
+                    s2, c2, t2, f2 = http_get(nested_url, timeout=10)
+                    for l in extract_sitemap_locs(t2):
+                        norm = normalize_url(l)
                         if same_domain(norm, root_netloc):
                             urls.add(norm)
                 except Exception as e:
@@ -150,20 +211,19 @@ def crawl_site(start_url, max_pages=50, delay=0.5, log_callback=None, cancel_che
             log_callback(f"Crawling ({len(discovered) + 1}/{max_pages}): {url}", "INFO")
 
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True)
-            if resp.status_code != 200 or 'text/html' not in resp.headers.get('Content-Type', ''):
+            status, ctype, text, final_url = http_get(url, timeout=10)
+            if status != 200 or 'text/html' not in ctype.lower():
                 continue
             
-            final_url = normalize_url(resp.url)
-            discovered.add(final_url)
+            norm_final = normalize_url(final_url)
+            discovered.add(norm_final)
 
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            for a in soup.find_all('a', href=True):
-                href = a['href'].strip()
+            hrefs = extract_html_hrefs(text)
+            for href in hrefs:
                 if not href or href.startswith(('mailto:', 'tel:', 'javascript:', '#')):
                     continue
                 
-                link = normalize_url(urljoin(final_url, href))
+                link = normalize_url(urljoin(norm_final, href))
                 if SKIP_EXT.search(link):
                     continue
 
@@ -375,6 +435,12 @@ async def ensure_playwright_ready_async(log_callback=None):
     """Ensure Playwright Chromium browser is installed and ready."""
     try:
         from playwright.async_api import async_playwright
+    except ImportError:
+        if log_callback:
+            log_callback("Playwright Python package is not installed. Run: pip install playwright", "ERROR")
+        return False
+
+    try:
         async with async_playwright() as p:
             b = await p.chromium.launch(headless=True)
             await b.close()
@@ -387,9 +453,14 @@ async def ensure_playwright_ready_async(log_callback=None):
                 sys.executable, "-m", "playwright", "install", "chromium"
             )
             await proc.communicate()
-            if log_callback:
-                log_callback("Playwright Chromium installed successfully!", "SUCCESS")
-            return True
+            if proc.returncode == 0:
+                if log_callback:
+                    log_callback("Playwright Chromium installed successfully!", "SUCCESS")
+                return True
+            else:
+                if log_callback:
+                    log_callback("Failed to install Playwright Chromium browser binary.", "ERROR")
+                return False
         except Exception as err:
             if log_callback:
                 log_callback(f"Failed to install Playwright Chromium: {err}", "ERROR")
@@ -400,7 +471,12 @@ async def screenshot_worker_async(urls, output_dir, viewport_width=1440, wait_ms
                                  progress_callback=None, log_callback=None, result_callback=None, cancel_check=None):
     """Execute screenshot captures using async Playwright."""
     os.makedirs(output_dir, exist_ok=True)
-    from playwright.async_api import async_playwright
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        if log_callback:
+            log_callback("Playwright package is missing. Run: pip install playwright", "ERROR")
+        return []
 
     if log_callback:
         log_callback(f"Launching Playwright Chromium (Viewport: {viewport_width}px, Delay: {load_delay_sec}s, Unhide: {unhide_animations})...", "INFO")
@@ -465,16 +541,18 @@ async def screenshot_worker_async(urls, output_dir, viewport_width=1440, wait_ms
     return results
 
 
-class WebsiteScreenshotterGUI(ctk.CTk):
+class WebsiteScreenshotterGUI(BaseGUI):
     """Modern Dark Mode GUI matching Screenshotter Pro design."""
 
     def __init__(self):
         super().__init__()
 
-        self.title("Website Full-Page Screenshotter Pro")
+        self.title("Screenshotter Pro")
         self.geometry("1240 x 800")
         self.minsize(1080, 720)
         self.configure(fg_color="#0D111A")
+
+        self._setup_app_icon()
 
         # Application State & Metrics
         self.is_running = False
@@ -498,6 +576,34 @@ class WebsiteScreenshotterGUI(ctk.CTk):
         # Start periodic log queue & timer polling
         self.after(100, self._process_log_queue)
 
+    def _setup_app_icon(self):
+        """Set application icon for window titlebar and taskbar."""
+        script_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        ico_path = os.path.join(script_dir, "assets", "icon.ico")
+        png_path = os.path.join(script_dir, "assets", "icon.png")
+        root_png = os.path.join(script_dir, "website_screenshotter_icon.png")
+
+        icon_path = None
+        if os.path.exists(ico_path):
+            icon_path = ico_path
+        elif os.path.exists(png_path):
+            icon_path = png_path
+        elif os.path.exists(root_png):
+            icon_path = root_png
+
+        if icon_path:
+            try:
+                if icon_path.endswith(".ico"):
+                    self.wm_iconbitmap(icon_path)
+                else:
+                    from PIL import ImageTk
+                    img = Image.open(icon_path)
+                    photo = ImageTk.PhotoImage(img.resize((32, 32)))
+                    self.iconphoto(False, photo)
+                    self._app_icon_ref = photo
+            except Exception:
+                pass
+
     def _create_sidebar(self):
         self.sidebar = ctk.CTkFrame(self, width=340, corner_radius=12, fg_color="#161B26")
         self.sidebar.grid(row=0, column=0, sticky="nsew", padx=(15, 8), pady=15)
@@ -507,11 +613,25 @@ class WebsiteScreenshotterGUI(ctk.CTk):
         header_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
         header_frame.grid(row=0, column=0, padx=20, pady=(20, 15), sticky="ew")
 
-        logo_box = ctk.CTkFrame(header_frame, width=44, height=44, corner_radius=10, fg_color="#5865F2")
+        logo_box = ctk.CTkFrame(header_frame, width=44, height=44, corner_radius=10, fg_color="#1E2330")
         logo_box.grid(row=0, column=0, rowspan=2, padx=(0, 12), pady=0)
         logo_box.grid_propagate(False)
 
-        logo_lbl = ctk.CTkLabel(logo_box, text="📸", font=ctk.CTkFont(size=22))
+        script_dir = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+        png_path = os.path.join(script_dir, "assets", "icon.png")
+        root_png = os.path.join(script_dir, "website_screenshotter_icon.png")
+        icon_path = png_path if os.path.exists(png_path) else (root_png if os.path.exists(root_png) else None)
+
+        if icon_path:
+            try:
+                icon_pil = Image.open(icon_path)
+                ctk_icon = ctk.CTkImage(light_image=icon_pil, dark_image=icon_pil, size=(36, 36))
+                logo_lbl = ctk.CTkLabel(logo_box, image=ctk_icon, text="")
+            except Exception:
+                logo_lbl = ctk.CTkLabel(logo_box, text="📸", font=ctk.CTkFont(size=22))
+        else:
+            logo_lbl = ctk.CTkLabel(logo_box, text="📸", font=ctk.CTkFont(size=22))
+
         logo_lbl.place(relx=0.5, rely=0.5, anchor="center")
 
         title_lbl = ctk.CTkLabel(header_frame, text="Screenshotter Pro", font=ctk.CTkFont(size=18, weight="bold"), text_color="#FFFFFF")
@@ -1127,7 +1247,7 @@ def main():
     parser.add_argument('--output-dir', default='screenshots', help='Output folder')
     args = parser.parse_args()
 
-    if args.cli and args.domain:
+    if (args.cli or args.domain) and args.domain:
         start_url = args.domain if args.domain.startswith('http') else f'https://{args.domain}'
         print(f"Starting CLI capture for: {start_url}")
         log_cb = lambda msg, level="INFO": print(f"[{level}] {msg}")
@@ -1135,6 +1255,9 @@ def main():
         urls = crawl_site(start_url, max_pages=args.max_pages, log_callback=log_cb)
         asyncio.run(screenshot_worker_async(urls, args.output_dir, load_delay_sec=args.delay, unhide_animations=args.unhide_animations, log_callback=log_cb))
     else:
+        if not _HAS_CTK:
+            print("[ERROR] CustomTkinter or PIL is missing. Please install dependencies:\n  pip install customtkinter pillow playwright requests bs4\nOr run CLI mode:\n  python website_screenshotter.py --cli example.com")
+            return
         app = WebsiteScreenshotterGUI()
         app.mainloop()
 

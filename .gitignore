@@ -1,7 +1,10 @@
 # Screenshots output directory & image artifacts
 screenshots/
 test_screenshots/
-*.png
+
+# Keep app logo & readme preview image
+!website_screenshotter_icon.png
+!screenshot.png
 
 # Python bytecode and cache
 __pycache__/
