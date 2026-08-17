@@ -28,3 +28,6 @@ Thumbs.db
 # Playwright & Testing artifacts
 playwright-report/
 test-results/
+
+/build
+/dist

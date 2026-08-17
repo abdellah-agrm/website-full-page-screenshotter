@@ -731,7 +731,8 @@ class WebsiteScreenshotterGUI(BaseGUI):
         folder_frame.columnconfigure(0, weight=1)
 
         self.output_entry = ctk.CTkEntry(folder_frame, height=36, fg_color="#0F131E", border_color="#2A324B", text_color="#FFFFFF")
-        self.output_entry.insert(0, os.path.abspath("screenshots"))
+        app_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.getcwd()
+        self.output_entry.insert(0, os.path.abspath(os.path.join(app_dir, "screenshots")))
         self.output_entry.grid(row=0, column=0, padx=(0, 6), sticky="ew")
 
         browse_btn = ctk.CTkButton(folder_frame, text="📁", width=38, height=36, fg_color="#21283B", hover_color="#2A324B", command=self._browse_folder)
