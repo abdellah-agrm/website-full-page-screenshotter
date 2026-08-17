@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./website_screenshotter_icon.png" alt="Screenshotter Pro Logo" width="96"/>
+  <img src="./imgs/website_screenshotter_icon.png" alt="Screenshotter Pro Logo" width="96"/>
   <h1>Screenshotter Pro</h1>
   <p><b>Automated High-Resolution Full-Page Website Screenshot Application</b></p>
 </div>
@@ -8,7 +8,7 @@
 
 ## 🖼️ Application Interface
 
-![Screenshotter Pro Interface](./screenshot.png)
+![Screenshotter Pro Interface](./imgs/screenshot.png)
 
 ---
 
