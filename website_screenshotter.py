@@ -240,6 +240,94 @@ def crawl_site(start_url, max_pages=50, delay=0.5, log_callback=None, cancel_che
     return discovered
 
 
+def find_system_chromium():
+    """Find installed system Chromium-based browser (Edge, Chrome, Brave)."""
+    candidates = []
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA", "")
+        program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+        program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+
+        candidates.extend([
+            os.path.join(program_files_x86, "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(program_files, "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(local_app_data, "Microsoft", "Edge", "Application", "msedge.exe"),
+            os.path.join(program_files, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(program_files_x86, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(local_app_data, "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(program_files, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+        ])
+    elif sys.platform == "darwin":
+        candidates.extend([
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ])
+    else:  # Linux
+        candidates.extend([
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/microsoft-edge",
+            "/usr/bin/microsoft-edge-stable",
+        ])
+
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+async def launch_browser_async(p, log_callback=None):
+    """
+    Launch browser engine with multiple robust fallbacks:
+    1. System Microsoft Edge (channel='msedge') - built into all Windows 10/11
+    2. System Google Chrome (channel='chrome')
+    3. Auto-detected system Chromium executable path
+    4. Playwright bundled Chromium
+    """
+    # 1. System Edge channel (native to Windows 10 & 11)
+    try:
+        browser = await p.chromium.launch(channel="msedge", headless=True)
+        if log_callback:
+            log_callback("Connected to native Microsoft Edge engine.", "INFO")
+        return browser
+    except Exception:
+        pass
+
+    # 2. System Chrome channel
+    try:
+        browser = await p.chromium.launch(channel="chrome", headless=True)
+        if log_callback:
+            log_callback("Connected to Google Chrome engine.", "INFO")
+        return browser
+    except Exception:
+        pass
+
+    # 3. Direct executable path to Edge or Chrome
+    system_path = find_system_chromium()
+    if system_path:
+        try:
+            browser = await p.chromium.launch(executable_path=system_path, headless=True)
+            if log_callback:
+                log_callback(f"Connected to system browser: {os.path.basename(system_path)}", "INFO")
+            return browser
+        except Exception:
+            pass
+
+    # 4. Playwright bundled Chromium (if user installed it)
+    try:
+        browser = await p.chromium.launch(headless=True)
+        if log_callback:
+            log_callback("Connected to Playwright Chromium engine.", "INFO")
+        return browser
+    except Exception:
+        pass
+
+    return None
+
+
 async def crawl_site_playwright_spa(start_url, root_netloc, max_pages=50, log_callback=None):
     """Fall back Playwright crawler for Single Page Applications (React/Vue/Next.js)."""
     from playwright.async_api import async_playwright
@@ -250,7 +338,9 @@ async def crawl_site_playwright_spa(start_url, root_netloc, max_pages=50, log_ca
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await launch_browser_async(p, log_callback=log_callback)
+            if not browser:
+                return discovered
             page = await browser.new_page()
             try:
                 await page.goto(start_url, wait_until='commit', timeout=20000)
@@ -462,7 +552,7 @@ async def auto_scroll_async(page, step=500, pause_ms=80, load_delay_sec=1.5, unh
 
 
 async def ensure_playwright_ready_async(log_callback=None):
-    """Ensure Playwright Chromium browser is installed and ready."""
+    """Ensure a Chromium browser engine (Edge, Chrome, or Playwright Chromium) is ready."""
     try:
         from playwright.async_api import async_playwright
     except ImportError:
@@ -470,31 +560,65 @@ async def ensure_playwright_ready_async(log_callback=None):
             log_callback("Playwright Python package is not installed. Run: pip install playwright", "ERROR")
         return False
 
+    # 1. Quick check if a system browser (Edge / Chrome) or existing Chromium works
     try:
         async with async_playwright() as p:
-            b = await p.chromium.launch(headless=True)
-            await b.close()
-        return True
-    except Exception as e:
-        if log_callback:
-            log_callback("Chromium binary missing. Installing Playwright Chromium...", "WARNING")
+            browser = await launch_browser_async(p, log_callback=log_callback)
+            if browser:
+                await browser.close()
+                if log_callback:
+                    log_callback("Browser engine (Edge / Chrome / Chromium) verified and ready.", "INFO")
+                return True
+    except Exception:
+        pass
+
+    # 2. If no system browser was launchable, attempt to install Playwright Chromium
+    if log_callback:
+        log_callback("No system browser found. Installing Playwright Chromium browser binary...", "WARNING")
+
+    installed = False
+    # Method A: Use bundled Playwright driver (works inside standalone PyInstaller .exe)
+    try:
+        from playwright._impl._driver import compute_driver_executable
+        driver_executable, driver_cli = compute_driver_executable()
+        cmd = [str(driver_executable)]
+        if driver_cli:
+            cmd.append(str(driver_cli))
+        cmd.extend(["install", "chromium"])
+        proc = await asyncio.create_subprocess_exec(*cmd)
+        await proc.communicate()
+        if proc.returncode == 0:
+            installed = True
+    except Exception:
+        pass
+
+    # Method B: Fallback via python -m playwright when running as a python script
+    if not installed and not getattr(sys, 'frozen', False):
         try:
             proc = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", "playwright", "install", "chromium"
             )
             await proc.communicate()
             if proc.returncode == 0:
+                installed = True
+        except Exception:
+            pass
+
+    # 3. Final verification
+    try:
+        async with async_playwright() as p:
+            browser = await launch_browser_async(p, log_callback=log_callback)
+            if browser:
+                await browser.close()
                 if log_callback:
-                    log_callback("Playwright Chromium installed successfully!", "SUCCESS")
+                    log_callback("Playwright Chromium browser installed and verified!", "SUCCESS")
                 return True
-            else:
-                if log_callback:
-                    log_callback("Failed to install Playwright Chromium browser binary.", "ERROR")
-                return False
-        except Exception as err:
-            if log_callback:
-                log_callback(f"Failed to install Playwright Chromium: {err}", "ERROR")
-            return False
+    except Exception:
+        pass
+
+    if log_callback:
+        log_callback("Could not find or launch Edge, Chrome, or Playwright Chromium.", "ERROR")
+    return False
 
 
 async def screenshot_worker_async(urls, output_dir, viewport_width=1440, wait_ms=1500, load_delay_sec=1.5, unhide_animations=False,
@@ -509,7 +633,7 @@ async def screenshot_worker_async(urls, output_dir, viewport_width=1440, wait_ms
         return []
 
     if log_callback:
-        log_callback(f"Launching Playwright Chromium (Viewport: {viewport_width}px, Delay: {load_delay_sec}s, Unhide: {unhide_animations})...", "INFO")
+        log_callback(f"Launching Browser Engine (Viewport: {viewport_width}px, Delay: {load_delay_sec}s, Unhide: {unhide_animations})...", "INFO")
 
     results = []
     total = len(urls)
@@ -517,7 +641,11 @@ async def screenshot_worker_async(urls, output_dir, viewport_width=1440, wait_ms
 
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await launch_browser_async(p, log_callback=log_callback)
+            if not browser:
+                if log_callback:
+                    log_callback("Failed to launch any browser engine (Edge, Chrome, or Chromium).", "ERROR")
+                return []
             page = await browser.new_page(viewport={'width': viewport_width, 'height': 900})
 
             for i, url in enumerate(sorted(urls), 1):

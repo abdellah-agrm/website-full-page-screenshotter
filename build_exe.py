@@ -70,7 +70,8 @@ def main():
         "--onefile",
         "--name=ScreenshotterPro",
         f"--paths={project_dir}",
-        f"--add-data={ctk_path};customtkinter/",
+        "--collect-all=customtkinter",
+        "--collect-all=playwright",
         "--clean",
     ]
 
